@@ -1,0 +1,199 @@
+#!/usr/bin/python
+import sys,os
+from pprint import pprint
+import subprocess
+import argparse
+import deb822
+from string import Template
+from datetime import datetime,timedelta
+import shutil
+
+satisfydepends_dummy_pkg = """
+Package: pbuilder-satisfydepends-dummy
+Version: 0.invalid.0
+Architecture: $ARCH
+Maintainer: Debian Pbuilder Team <pbuilder-maint@lists.alioth.debian.org>
+Description: Dummy package to satisfy dependencies with aptitude - created by pbuilder
+ This package was created automatically by pbuilder to satisfy the
+ build-dependencies of the package being currently built.
+$DEPENDS$CONFLICTS"""
+
+
+ccache_dir = "/home/kiniou/.ccache"
+
+lintian_cmd = ["lintian" , "-Ivi" , "--pedantic"]
+
+
+
+def generate_dummy_pkg(arch,release,dsc):
+
+    dsc_file = file(args.file)
+    dsc = deb822.Dsc(dsc_file)
+    dsc_file.close()
+
+    if(dsc.has_key('Build-Depends') ):
+        depends = dsc['Build-Depends']
+    else:
+        depends = None
+    if( dsc.has_key('Build-Conflicts') ):
+        conflicts = dsc['Build-Conflicts']
+    else:
+        conflicts = None
+
+
+    s = Template(satisfydepends_dummy_pkg)
+    v = {}
+    v['ARCH'] = arch
+    if depends :
+        v['DEPENDS']= "Depends: %s\n" % depends
+    else:
+        v['DEPENDS'] = ""
+    if conflicts : 
+        v['CONFLICTS'] = "Conflicts: %s\n" % conflicts
+    else:
+        v['CONFLICTS'] = ""
+
+    c = s.safe_substitute(v)
+
+    return c
+
+
+def copy_dsc_files(file_name,t_location):
+    
+    dsc_file = file(file_name)
+    dsc_obj = deb822.Dsc(dsc_file)
+    dsc_file.close()
+  
+    (path_head,path_tail) = os.path.split(file_name)
+
+    print(path_head,path_tail)
+ 
+    file_srcs = [file_name]
+    for f in dsc_obj['Files']:
+        file_srcs += [os.path.join(path_head,f['name'])]
+
+    for f in file_srcs:
+        print("Copying '%s' to '%s'"% (os.path.basename(f) , t_location) )
+        shutil.copy2(os.path.join(path_head,f), t_location)
+ 
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Simply build a .deb package in schroot",formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser.add_argument('-a','--arch',metavar="ARCHITECTURE",help="What architecture to select",default="i386")
+    parser.add_argument('-r','--release',help="What release to select",default="unstable")
+    parser.add_argument('file', help="specify the .dsc file to build")
+
+    args = parser.parse_args()
+
+    chroot_name = 'chroot:%s-%s-sbuild' % (args.release,args.arch)
+
+    start_time = datetime.now()
+
+    #check if chroot exists
+    cmd = ['schroot' , '-c', '%s' % chroot_name, '--list']
+    chroot_not_found = subprocess.Popen(cmd,cwd='/').wait()
+    if chroot_not_found:
+        print("E: chroot %s doesn't exist!!" % chroot_name)
+        exit()
+
+    cmd = [ 'schroot' , '--begin-session' , '-c' , chroot_name]
+    p = subprocess.Popen(cmd,cwd='/',stdout=subprocess.PIPE)
+    (r_stdout,r_stderr)=p.communicate()
+    session_name = r_stdout.strip()
+    print(session_name)
+
+    schroot_cmd = ['schroot' , '-c' , 'session:%s' % ( session_name) ]
+
+    cmd = schroot_cmd + [ '--location' ]
+    
+    p = subprocess.Popen(cmd,cwd='/',stdout=subprocess.PIPE)
+    (r_stdout,r_stderr)=p.communicate()
+    session_location = r_stdout.strip()
+    print(session_location)
+
+
+
+    path = os.getenv('PATH')
+    if path:
+        os.putenv('PATH','/usr/lib/ccache:%s' % path)
+    os.putenv('CCACHE_DIR', ccache_dir)
+    os.putenv('LANG','C')
+    os.putenv('LC_ALL','C')
+    os.putenv('DEBIAN_FRONTEND','noninteractive')
+    #Get the schroot environment
+    p = subprocess.Popen( schroot_cmd + ['--run-session','--','env'] ,
+        cwd='/')
+    p.wait()
+    print(dir(p))
+
+
+    build_location = os.path.join(session_location,"build")
+
+    cmd = schroot_cmd + [ '--run-session' , '--', 'mkdir' , '-v' , '-p', "/build" ]
+    print(" ".join(cmd))
+    p = subprocess.Popen(cmd,cwd='/')
+    p.wait()
+
+
+    build_dep_pkg_name = "pbuilder-satisfydepends-dummy"
+    build_dep_deb_dir = os.path.join("/tmp/satisfydepends-aptitude",build_dep_pkg_name)
+    control_file = generate_dummy_pkg(args.arch , args.release, args.file )
+    cmd = schroot_cmd + ['--run-session' , '--', 'mkdir' , '-v' , '-p', os.path.join(build_dep_deb_dir,"DEBIAN")]
+    subprocess.Popen(cmd,cwd='/').wait()
+
+    cmd = schroot_cmd + ['--run-session', '--','sh', '-c', '"cat >%s"'%os.path.join(build_dep_deb_dir,"DEBIAN","control"),'<<',''.join(['EOF',control_file,'EOF'])]
+    subprocess.Popen(" ".join(cmd),shell=True,cwd='/').wait()
+    
+    cmd = schroot_cmd + ['--run-session', '--', 'cat' , os.path.join(build_dep_deb_dir,"DEBIAN","control")]
+    subprocess.Popen(cmd,cwd='/').wait()
+   
+    cmd = schroot_cmd + ['--run-session' , '--' , 'dpkg-deb', '-b', build_dep_deb_dir] 
+    subprocess.Popen(cmd,cwd='/').wait()
+
+    cmd = schroot_cmd + ['--run-session', '-u' , 'root' , '--' , 'dpkg', '-i', "%s.deb" % build_dep_deb_dir] 
+    subprocess.Popen(cmd,cwd='/').wait()
+
+    cmd = schroot_cmd + ['--run-session', '-u' , 'root' , '--' ] + \
+    [   'aptitude', 
+        '-y', 
+        '--without-recommends',
+        '-o', 'APT::Install-Recommends=false',
+        '-o', 'Aptitude::ProblemResolver::StepScore=100',
+        'install',
+        build_dep_pkg_name
+    ] 
+    subprocess.Popen(cmd,cwd='/').wait()
+    
+    cmd = " ".join(schroot_cmd) + " --run-session -- dpkg -l pbuilder-satisfydepends-dummy 2>/dev/null"
+    subprocess.Popen(cmd,shell=True,cwd='/').wait()
+    cmd = " ".join(schroot_cmd) + " --run-session -- dpkg -l pbuilder-satisfydepends-dummy 2>/dev/null | grep -q ^ii"
+    print(cmd)
+    retcode = subprocess.Popen(cmd,shell=True,cwd='/').wait() 
+    print("RETURNCODE %d" % retcode)
+    if ( retcode ):
+        print("Aptitude couldn't install the build dependencies")
+        subprocess.Popen(" ".join(schroot_cmd) + " --run-session -- aptitude why-not pbuilder-satisfydepends-dummy",cwd='/',shell=True).wait()
+    else:
+        copy_dsc_files(args.file,build_location)
+        dsc = os.path.splitext(os.path.basename(args.file))[0]
+        cmd = schroot_cmd + ['--run-session','-d','/build', '--','dpkg-source' ,'-x' ,"%s.dsc" % dsc, dsc]
+        subprocess.Popen(cmd , cwd='/').wait()
+        cmd = schroot_cmd + ['--run-session','-d','/build/%s'%dsc, '--','dpkg-buildpackage' ,'-b' , '-us' , '-uc']
+        retcode = subprocess.Popen(cmd , cwd='/').wait()
+        print('dpkg-buildpackage retcode : %d' % retcode )
+        
+
+
+#    cmd = ['pbuilder', '--build' , '--buildplace',build_location, '--no-targz' , args.file ]
+#    p = subprocess.Popen(cmd,cwd='/')
+#    p.wait()
+
+#    cmd = schroot_cmd + [ '--end-session' ]
+#    p = subprocess.Popen(cmd,cwd='/')
+#    p.wait()
+
+    end_time=datetime.now()
+
+    print(end_time-start_time)

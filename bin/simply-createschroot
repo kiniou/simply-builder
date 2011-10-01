@@ -1,0 +1,105 @@
+#!/usr/bin/python
+
+import sys,os
+import argparse
+import subprocess
+from pprint import pprint
+
+chroot_start_path="/srv/chroot"
+chroots_conf="/etc/schroot/chroot.d"
+
+build_pkgs = 'build-essential fakeroot devscripts apt-utils'
+include = 'eatmydata,ccache,lintian'
+distro_conf={
+    'debootstrap_mirror':None,
+    'components':None,
+    'source_security_suites':None,
+    'source_security_url':None,
+    'skip_updates':False,
+    'skip_security':False,
+    'keyring':None,
+}
+def configure_distro(distro="debian",arch="i386",release="unstable"):
+
+    if distro not in ['ubuntu','debian']:
+        print("Unknown Distro %s" % distro)
+        return False
+
+    if (distro == 'ubuntu'):
+        if   ( arch in ['amd64','i386'] ):
+            distro_conf['debootstrap_mirror'] = "http://archive.ubuntu.com/ubuntu"
+        elif ( arch in ['armel', 'hppa', 'ia64' , 'lpia', 'sparc'] ):
+            distro_conf['debootstrap_mirror'] = "http://ports.ubuntu.com/ubuntu-ports"
+        elif ( arch in ['powerpc'] ):
+            distro_conf['debootstrap_mirror'] = "http://archive.ubuntu.com/ubuntu"
+
+        distro_conf['components'] = ['main','restricted', 'universe', 'multiverse']
+
+        distro_conf['keyring'] = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+    elif (distro == 'debian'):
+        distro_conf['debootstrap_mirror'] = "http://ftp.debian.org/debian"
+        distro_conf['components'] = ['main','non-free','contrib']
+        distro_conf['source_security_suites'] = "RELEASE/updates"
+        distro_conf['source_security_url'] = "http://security.debian.org/"
+        #Debian only performs security updates
+        distro_conf['skip_updates'] = True
+
+        if (release in ['unstable','sid'] ):
+            distro_conf['skip_security'] = True
+
+        distro_conf['keyring'] = "/usr/share/keyrings/debian-archive-keyring.gpg"
+
+
+def check_chroot_path(start_path,end_path):
+    if( os.path.ismount( start_path ) ) :
+        print("%s is mounted" % start_path)
+    else:
+        print("%s is not mounted" % start_path)
+        exit()
+
+    complete_path = os.path.join(start_path,end_path)
+    cmd = 'btrfs subvolume list "%s" > /dev/null 2>&1' %  complete_path
+    p = subprocess.Popen(cmd,cwd='/',shell=True)
+    p.wait()
+    print(p.returncode)
+    if (not p.returncode):
+        print("E: %s already exist!"%complete_path)
+        exit()
+    else:
+        cmd = 'btrfs subvolume create "%s"' % complete_path
+        p = subprocess.Popen(cmd,cwd='/',shell=True)
+        p.wait()
+        print(p.returncode)
+    
+if __name__ == "__main__":
+
+    if os.geteuid() != 0:
+        print("You must be root")
+        exit()
+
+    parser = argparse.ArgumentParser(description="Create a Sbuild Chroot",formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser.add_argument('-d','--distro',metavar="DISTRIBUTION",help="Install specific distro",default="debian")
+    parser.add_argument('-a','--arch',metavar="ARCHITECTURE",help="What architecture to select",default="i386")
+    parser.add_argument('-r','--release',help="What release to select",default="unstable")
+
+    args = parser.parse_args()
+    chroot_end_path = os.path.join( args.distro , "-".join([args.release,args.arch]) )
+    check_chroot_path(chroot_start_path,chroot_end_path)
+
+    configure_distro(args.distro,args.arch,args.release)
+
+    pprint(distro_conf)
+    cmd = [ 'sbuild-createchroot' ,
+            '--verbose',
+            '--keyring=%s' % distro_conf['keyring'] ,
+            '--arch=%s' % args.arch ,
+            '--include=%s' % include,
+            '--components=%s' % ",".join(distro_conf['components']),
+            args.release ,
+            os.path.join(chroot_start_path,chroot_end_path),
+            distro_conf['debootstrap_mirror'],
+    ]
+    pprint(cmd)
+    p = subprocess.Popen(cmd,cwd='/')
+    p.wait()
