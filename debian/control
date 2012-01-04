@@ -1,0 +1,16 @@
+Source: simply-builder
+Section: devel
+Priority: extra
+Maintainer: Kevin Roy <kiniou@gmail.com>
+Build-Depends: cdbs, debhelper (>= 5), python (>= 2.5), python-support
+Standards-Version: 3.8.4
+Homepage: http://github.com/kiniou/simply-builder
+
+Package: simply-builder
+Architecture: all
+Suggests: ccache
+Depends: ${shlibs:Depends}, ${misc:Depends}, ${python:Depends}, lsb-base, aptitude, schroot
+Description: Another debian-based builder
+ This tool aims to let you just simply setup and build your debianic package 
+ in a clean and non-intrusive for your computer.
+ It is mainly focused on schroot but could be use on physical or virtual machines.
